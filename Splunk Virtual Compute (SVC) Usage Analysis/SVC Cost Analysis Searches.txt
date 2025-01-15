@@ -1,0 +1,282 @@
+Aggregated Count of Skipped Scheduled Searches by App, Search Type, and Reason
+index = _internal skipped sourcetype=scheduler status=skipped host=*
+| stats count by app search_type reason savedsearch_name 
+| sort -count
+
+Minimum Frequency Analysis of Scheduled 'UCF' Saved Searches in Splunk
+| rest splunk_server=local "/servicesNS/-/-/saved/searches/" search="is_scheduled=1" search="disabled=0"
+| search title="*UCF*"
+| fields title, cron_schedule, eai:acl.app
+| rename title as savedsearch_name 
+| eval pieces=split(cron_schedule, " ") 
+| eval c_min=mvindex(pieces, 0), c_h=mvindex(pieces, 1), c_d=mvindex(pieces, 2), c_mday=mvindex(pieces, 3), c_wday=mvindex(pieces, 4) 
+| eval c_min_div=if(match(c_min, "/"), replace(c_min, "^.*/(\d+)$", "\1"), null()) 
+| eval c_mins=if(match(c_min, ","), split(c_min, ","), null()) 
+| eval c_min_div=if(isnotnull(c_mins), abs(tonumber(mvindex(c_mins, 1)) - tonumber(mvindex(c_mins, 0))), c_min_div) 
+| eval c_hs=if(match(c_h, ","), split(c_h, ","), null()) 
+| eval c_h_div=case(match(c_h, "/"), replace(c_h, "^.*/(\d+)$", "\1"), isnotnull(c_hs), abs(tonumber(mvindex(c_hs, 1)) - tonumber(mvindex(c_hs, 0))), 1=1, null()) 
+| eval c_wdays=if(match(c_wday, ","), split(c_wday, ","), null()) 
+| eval c_wday_div=case(match(c_wday, "/"), replace(c_wday, "^.*/(\d+)$", "\1"), isnotnull(c_wdays), abs(tonumber(mvindex(c_wdays, 1)) - tonumber(mvindex(c_wdays, 0))), 1=1, null()) 
+| eval i_m=case(c_d < 29, 86400 * 28, c_d = 31, 86400 * 31, 1=1, null()) 
+| eval i_h=case(isnotnull(c_h_div), c_h_div * 3600, c_h = "*", null(), match(c_h, "^\d+$"), 86400) 
+| eval i_min=case(isnotnull(c_min_div), c_min_div * 60, c_min = "*", 60, match(c_min, "^\d+$"), 3600) 
+| eval i_wk=case(isnotnull(c_wday_div), c_wday_div * 86400, c_wday = "*", null(), match(c_wday, "^\d+$"), 604800) 
+| eval cron_minimum_freq=case(isnotnull(i_m), i_m, isnotnull(i_wk) AND isnotnull(c_min_div), i_min, isnotnull(i_wk) AND isnull(c_min_div), i_wk, isnotnull(i_h), i_h, 1=1, min(i_min)) 
+| fields - c_d c_h c_hs c_h_div c_mday c_min c_min_div c_mins c_wday c_wdays c_wday_div pieces i_m i_min i_h i_wk 
+| fields savedsearch_name cron_minimum_freq cron_schedule eai:acl.app
+
+Count of Duplicate Runs for UCF Saved Searches in Splunk Scheduler
+index=_internal sourcetype=scheduler scheduled_time=* savedsearch_name=*UCF* 
+| stats count by scheduled_time, savedsearch_name 
+| where count > 1
+
+UCF Saved Search with the Longest Maximum Duration and Its Statistics
+index=_audit action=search info=completed
+| search savedsearch_name="*UCF*"
+| eval duration=round((endtime-starttime)/60,2) 
+| stats avg(duration) as avg_duration, max(duration) as max_duration, min(duration) as min_duration, max(endtime) as latest_endtime by savedsearch_name
+| sort - max_duration
+| head 1
+| eval latest_endtime_str=strftime(latest_endtime, "%Y-%m-%d %H:%M:%S")
+| table savedsearch_name, avg_duration, min_duration, max_duration, latest_endtime_str
+
+Comprehensive Analysis of UCF-related Saved Searches Performance Metrics in Splunk
+index=_internal sourcetype=scheduler result_count 
+| extract pairdelim=",", kvdelim="=", auto=f 
+| stats avg(result_count) min(result_count) max(result_count), sparkline avg(run_time) min(run_time) max(run_time) sum(run_time) values(host) AS hosts count AS execution_count by savedsearch_name, app 
+| join savedsearch_name type=outer 
+[| rest /servicesNS/-/-/saved/searches 
+| fields title eai:acl.owner cron_schedule dispatch.earliest_time dispatch.latest_time search 
+| rename title AS savedsearch_name eai:acl.app AS App eai:acl.owner AS Owner cron_schedule AS "Cron Schedule" dispatch.earliest_time AS "Dispatch Earliest Time" dispatch.latest_time AS "Dispatch Latest Time"]
+| rename savedsearch_name AS "Saved Search Name" search AS "SPL Query" app AS App 
+| makemv delim="," values(host) 
+| sort - avg(run_time) 
+| search "SPL Query"="*UCF*" 
+| table "Saved Search Name", App, Owner, "SPL Query", "Dispatch Earliest Time", "Dispatch Latest Time", "Cron Schedule", hosts, execution_count, sparkline, *(result_count), sum(run_time), *(run_time)
+
+UCF Dashboards in Splunk: Last Accessed Date and User
+| rest /servicesNS/-/-/data/ui/views splunk_server=* 
+| search isDashboard=1 title=*UCF* 
+| rename eai:acl.app as app 
+| fields title app 
+| join type=left title 
+[| search index=_internal sourcetype=splunk_web_access host=* user=* 
+| rex field=uri_path ".*/(?<title>[^/]*)$" 
+| stats latest(_time) as Time latest(user) as user by title
+] 
+| where isnotnull(Time) 
+| eval Now=now() 
+| eval "Days since last accessed"=round((Now-Time)/86400,2) 
+| sort - "Days since last accessed" 
+| convert ctime(Time) 
+| fields - Now
+
+Splunk Service Usage and Cost Analysis for 'ES' Search Head Over the Past 90 Days
+index=summary source="splunk-svc-consumer" svc_usage=* search_head_names="es"
+| eval search_app=coalesce(search_app,"N/A"),search_type=coalesce(search_type,"N/A"),search_user=coalesce(search_user,"N/A")
+| where _time >= relative_time(now(), "-90d@d") 
+| bin _time span=1h 
+| stats sum(svc_usage) as utilized_svc by search_app search_type search_user process_type _time
+| eval es_svc_allowance="882"
+| eval optimal_threshold=if(es_svc_allowance>0, es_svc_allowance*0.8, null())
+| eval cost="£" + tostring(round(utilized_svc, 2), "commas")
+
+Detailed User Search Behavior and Efficiency Analysis in Splunk with Error Insights
+index=_audit action=search info=completed 
+| eval Search_Duration = endtime - starttime
+| eval Search_Type = if(isnull(savedsearch_name), "Ad-hoc", "Scheduled")
+| eval Has_Error = if(searchmatch("error") OR searchmatch("failed"), 1, 0)
+| eval Is_Realtime = if(searchmatch("rt"), 1, 0)
+| stats count as Search_Count, avg(Search_Duration) as Avg_Search_Duration, count(eval(Search_Type="Ad-hoc")) as Adhoc_Search_Count, count(eval(Search_Type="Scheduled")) as Scheduled_Search_Count, avg(result_count) as Avg_Result_Count, sum(Has_Error) as Error_Search_Count, sum(Is_Realtime) as Realtime_Search_Count, values(source) as Error_Sources, values(sourcetype) as Error_Sourcetypes, values(host) as Error_Hosts, values(app) as Apps, values(rex(Common_Commands, "(stats|eval|where|table|top|timechart|by)")) as Commands by user
+| eval Error_Searches = mvjoin(search, ", ")
+| join user type=left [ search index=_internal source=*authorize.conf [ search index=_internal source=*authentication.conf User=* | table User, Roles ] | table User, Roles, Capabilities ]
+| eval Adhoc_Search_Percentage = round((Adhoc_Search_Count / Search_Count) * 100, 2)
+| eval Scheduled_Search_Percentage = 100 - Adhoc_Search_Percentage
+| eval Error_Search_Percentage = round((Error_Search_Count / Search_Count) * 100, 2)
+| eval Realtime_Search_Percentage = round((Realtime_Search_Count / Search_Count) * 100, 2)
+| eval Search_Efficiency = round(Avg_Result_Count / (Avg_Search_Duration / 3600), 2)
+| eval Avg_Search_Duration_Str = strftime(Avg_Search_Duration, "%Hh %Mm %Ss")
+| eval Search_Behavior = case(
+    Adhoc_Search_Percentage > 70, "High Ad-hoc",
+    Error_Search_Percentage > 20, "Error Prone",
+    Realtime_Search_Percentage > 50, "Real-time Heavy",
+    true(), "Balanced"
+)
+| eval Search_Description = case(
+    Search_Behavior="High Ad-hoc", "User frequently runs ad-hoc searches. Consider training on optimizing and scheduling searches.",
+    Search_Behavior="Error Prone", "User's searches often result in errors. Review specific error-prone searches and their sources for guidance.",
+    Search_Behavior="Real-time Heavy", "User frequently runs real-time searches. Consider training on the implications of real-time searches.",
+    Search_Behavior="Balanced", "User's search behavior is well-balanced."
+)
+| table user, Roles, Capabilities, Apps, Error_Searches, Avg_Search_Duration_Str, Adhoc_Search_Count, Scheduled_Search_Count, Avg_Result_Count, Error_Search_Count, Realtime_Search_Count, Search_Efficiency, Error_Sources, Error_Sourcetypes, Error_Hosts, Commands, Search_Behavior, Adhoc_Search_Percentage, Search_Description, Error_Search_Percentage, Realtime_Search_Percentage, Scheduled_Search_Percentage
+| sort - Search_Count
+| appendcols [ search index=_audit action=search info=completed 
+    | fields user, search, savedsearch_name
+    | eval Error_Cause = if(searchmatch("error") OR searchmatch("failed"), "Error", "No Error")
+    | table user, search, savedsearch_name, Error_Cause
+]
+
+Weekend Threshold Analysis for Service Consumption
+index=summary source="splunk-svc-consumer" svc_usage=* search_head_names="es"
+| eval search_app=coalesce(search_app,"N/A"), search_type=coalesce(search_type,"N/A"), search_user=coalesce(search_user,"N/A")
+| where _time >= relative_time(now(), "-7d@d") AND (strftime(_time, "%A")="Saturday" OR strftime(_time, "%A")="Sunday")
+| bin _time span=1h
+| stats sum(svc_usage) as utilized_svc by _time
+| eval es_svc_allowance=882
+| eval optimal_threshold=if(es_svc_allowance>0, es_svc_allowance*0.8, null())
+| eval cost="£" + tostring(round(utilized_svc, 2), "commas")
+| eval warning_condition=if(utilized_svc > optimal_threshold, "HighUsage", "Normal")
+| eval performance_issue=if(utilized_svc > es_svc_allowance, "PotentialIssue", "NoIssue")
+| table _time, utilized_svc, warning_condition, performance_issue
+
+This search would help you monitor the SVC usage over time to ensure it stays within the 1359 SVCs limit and to identify trends or spikes in usage.
+index=summary source="splunk-svc-consumer" svc_usage=*
+| timechart span=1d sum(svc_usage) as Daily_SVC_Usage
+| eval Contracted_SVC_Limit=1359
+| eval Over_Contracted_Limit=if(Daily_SVC_Usage > Contracted_SVC_Limit, "Yes", "No")
+| table _time, Daily_SVC_Usage, Contracted_SVC_Limit, Over_Contracted_Limit
+
+This search would help you monitor storage data usage to stay within the 1.8 Pb limit and to understand data ingestion trends.
+index=_internal source=*metrics.log* group=per_index_thruput series=*
+| timechart span=1d sum(kb) as Daily_Storage_KB
+| eval Daily_Storage_TB = round(Daily_Storage_KB / 1024 / 1024, 3)
+| eval Contracted_Storage_TB = 1800  
+| eval Over_Contracted_Storage=if(Daily_Storage_TB > Contracted_Storage_TB, "Yes", "No")
+| table _time, Daily_Storage_TB, Contracted_Storage_TB, Over_Contracted_Storage
+
+Monitoring SVC Usage
+index=summary source="splunk-svc-consumer" svc_usage=*
+| timechart span=1d sum(svc_usage) as Daily_SVC_Usage
+| eval Contracted_SVC_Limit=1359
+| eval Over_Contracted_Limit=if(Daily_SVC_Usage > Contracted_SVC_Limit, "Yes", "No")
+| table _time, Daily_SVC_Usage, Contracted_SVC_Limit, Over_Contracted_Limit
+
+Monitoring Storage Data Usage
+index=_internal source=*metrics.log* group=per_index_thruput series=*
+| timechart span=1d sum(kb) as Daily_Storage_KB
+| eval Daily_Storage_TB = round(Daily_Storage_KB / 1024 / 1024, 3)
+| eval Contracted_Storage_TB = 1800
+| eval Over_Contracted_Storage=if(Daily_Storage_TB > Contracted_Storage_TB, "Yes", "No")
+| table _time, Daily_Storage_TB, Contracted_Storage_TB, Over_Contracted_Storage
+
+Indexing Volume by Source Type
+index=_internal source=*metrics.log* group=per_sourcetype_thruput
+| timechart span=1d sum(kb) as DailyVolumeKB by series
+| eval DailyVolumeGB = round(DailyVolumeKB / 1024 / 1024, 2)
+| fieldformat DailyVolumeGB = tostring(DailyVolumeGB) + " GB"
+| rename series as SourceType
+
+License Usage Monitoring
+index=_internal source=*license_usage.log* type=Usage
+| timechart span=1d sum(b) as DailyBytes
+| eval DailyGB = round(DailyBytes / 1024^3, 2)
+| fieldformat DailyGB = tostring(DailyGB) + " GB"
+
+Identifying Expensive Searches
+index=_internal source=*audit.log* action=search info=completed
+| eval searchDuration = round(duration, 2)
+| where searchDuration > 60 
+| table _time, user, search, searchDuration
+| sort - searchDuration
+
+Errors and Warnings Monitoring
+index=_internal sourcetype=splunkd (log_level=ERROR OR log_level=WARN)
+| timechart span=1h count by log_level
+
+Data Retention and Index Sizing
+| dbinspect index=*
+| eval sizeGB = round(sizeOnDiskMB / 1024, 2)
+| stats sum(sizeGB) as TotalSizeGB by index
+| eval RetentionPeriod = case(index="indexA", "180", index="indexB", "90", true(), "default")
+| table index, TotalSizeGB, RetentionPeriod
+
+User Activity Monitoring
+index=_audit action=search (info=completed OR info=started)
+| stats count by user
+| sort - count
+
+Scheduled Searches Monitoring
+index=_internal source=*scheduler.log*
+| eval status = if(savedsearch_name=="", "Skipped", "Ran")
+| stats count by savedsearch_name, status
+| sort - count
+
+Forwarder Monitoring
+index=_internal sourcetype=splunkd component=Metrics group=tcpin_connections
+| timechart span=1h sum(kbps) as KBps by host
+| eval MBps = round(KBps / 1024, 2)
+| fieldformat MBps = tostring(MBps) + " MB/s"
+
+Data Input Monitoring
+index=_internal sourcetype=splunkd component=Metrics group=per_index_thruput
+| timechart span=1h sum(kb) as KB by source
+| eval MB = round(KB / 1024, 2)
+| fieldformat MB = tostring(MB) + " MB"
+
+SVC Usage Monitoring
+index=summary source="splunk-svc-consumer" svc_usage=*
+| timechart span=1d sum(svc_usage) as Daily_SVC_Usage
+| eval Contracted_SVC_Limit=1359
+| eval Over_Contracted_Limit=if(Daily_SVC_Usage > Contracted_SVC_Limit, "Yes", "No")
+| table _time, Daily_SVC_Usage, Contracted_SVC_Limit, Over_Contracted_Limit
+
+Storage Data Usage Monitoring
+index=_internal source=*metrics.log* group=per_index_thruput series=*
+| timechart span=1d sum(kb) as Daily_Storage_KB
+| eval Daily_Storage_TB = round(Daily_Storage_KB / 1024 / 1024, 3)
+| eval Contracted_Storage_TB = 1800  Assuming 1.8 Pb equals 1800 Tb
+| eval Over_Contracted_Storage=if(Daily_Storage_TB > Contracted_Storage_TB, "Yes", "No")
+| table _time, Daily_Storage_TB, Contracted_Storage_TB, Over_Contracted_Storage
+
+SVC Usage Alert
+index=summary source="splunk-svc-consumer" svc_usage=*
+| timechart span=1d sum(svc_usage) as Daily_SVC_Usage
+| eval Contracted_SVC_Limit=1359
+| where Daily_SVC_Usage > Contracted_SVC_Limit
+| streamstats count as AlertCount
+| where AlertCount=1
+| sendemail to="admin@example.com" subject="Splunk SVC Usage Alert" message="SVC usage exceeded contracted limit."
+
+SVC Optimization Opportunities
+index=summary source="splunk-svc-consumer" svc_usage=*
+| timechart span=1d avg(svc_usage) as Avg_Daily_SVC_Usage
+| where Avg_Daily_SVC_Usage < (0.8 * Contracted_SVC_Limit)
+| table _time, Avg_Daily_SVC_Usage
+
+SVC Usage Forecast
+index=summary source="splunk-svc-consumer" svc_usage=*
+| timechart span=1d sum(svc_usage) as Daily_SVC_Usage
+| predict Daily_SVC_Usage future_timespan=30 as forecast
+| fields _time, Daily_SVC_Usage, forecast
+
+SVC Usage by Department
+index=summary source="splunk-svc-consumer" svc_usage=* by department
+| timechart span=1d sum(svc_usage) as Daily_SVC_Usage by department
+
+Cost Analysis
+index=summary source="splunk-svc-consumer" svc_usage=*
+| timechart span=1d sum(svc_usage) as Daily_SVC_Usage
+| eval Daily_Cost = Daily_SVC_Usage * Cost_Per_SVC
+| table _time, Daily_SVC_Usage, Daily_Cost
+
+Data Cleanup Opportunities
+| dbinspect index=*
+| eval isFrozen=if(state=="frozen", "Yes", "No")
+| where isFrozen="No" AND age > Your_Retention_Period
+| table index, size, age
+
+This search provides a count of skipped scheduled searches, sorted by application, search type, reason, and the name of the saved search.
+index = _internal skipped sourcetype=scheduler status=skipped host=* UCF
+| stats count by app search_type reason savedsearch_name 
+| sort -count
+
+This search looks for logs related to license usage that have exceeded predefined limits.
+index=_internal sourcetype=splunkd component=LicenseUsage "exceeded"
+
+This search fetches views with "UCF" in the title from Splunk's UI views, displays their last viewed time, and filters out those not viewed in the last 90 days.
+| rest splunk_server=local "/servicesNS/-/-/data/ui/views" 
+| search title="*UCF*" 
+| table title eai:acl.app lastViewedTime
+| eval lastViewedEpoch=strptime(lastViewedTime, "%Y-%m-%dT%H:%M:%S.%Q%:z") 
+| where isnull(lastViewedEpoch) OR (now() - lastViewedEpoch) > (90*24*60*60)
+
