@@ -1,0 +1,232 @@
+// 1. Failed Logins Across All Systems
+SigninLogs
+| where ResultType != "0" // Non-zero result types indicate failures
+| summarize FailedAttempts=count() by UserPrincipalName, IPAddress, ResultDescription
+| sort by FailedAttempts desc
+// Use: Detect brute-force attacks or account lockouts
+
+// 2. Successful Logins from New Countries
+SigninLogs
+| where ResultType == "0" // Successful logins
+| summarize FirstSeen=min(TimeGenerated) by UserPrincipalName, Location
+| where FirstSeen > ago(7d)
+// Use: Identify anomalous logins (e.g., geo-impossible travel)
+
+// 3. Azure AD Risky Sign-Ins
+AADUserRiskEvents
+| where RiskState == "atRisk"
+| project TimeGenerated, UserPrincipalName, RiskEventType
+// Use: Review Azure AD Identity Protection alerts
+
+// 4. Devices with High Failed Logins
+SecurityEvent
+| where EventID == 4625 // Windows logon failure
+| summarize FailedCount=count() by Computer, Account
+| sort by FailedCount desc
+// Use: Find potential local account brute-forcing
+
+// 5. Top Processes Creating Network Connections
+SecurityEvent
+| where EventID == 4688 // Process creation
+| join (SecurityEvent | where EventID == 3) on ProcessId // Network connections
+| summarize Count=count() by NewProcessName
+| top 10 by Count
+// Use: Detect suspicious processes initiating connections
+
+// 6. DNS Exfiltration Patterns
+DnsEvents
+| where Name contains "exfil" or Name contains "malware" // Customize keywords
+| summarize count() by Name, ClientIP
+// Use: Hunt for data exfiltration via DNS tunneling
+
+// 7. HTTP User-Agent Anomalies
+CommonSecurityLog
+| where DeviceVendor == "Microsoft" and RequestMethod == "GET"
+| summarize count() by UserAgent
+| sort by count_ desc
+// Use: Identify malicious scanners or bots
+
+// 8. Unusual Data Transfers to External IPs
+Syslog
+| where SyslogMessage contains "OUT=" and Bytes > 1000000 // Large outbound transfers
+| project SourceIP, DestinationIP, Bytes
+// Use: Flag potential data theft (adjust Bytes threshold)
+
+// 9. PowerShell Script Block Logging
+SecurityEvent
+| where EventID == 4104 // PowerShell script block
+| where ScriptBlockText contains "Invoke-Mimikatz" // Example keyword
+// Use: Detect malicious PowerShell activity
+
+// 10. Scheduled Tasks Modified
+SecurityEvent
+| where EventID == 4698 // Scheduled task creation
+| where SubjectUserName != "SYSTEM"
+| project TimeGenerated, SubjectUserName, TaskName
+// Use: Spot persistence mechanisms
+
+// 11. Azure Resource Deletion Operations
+AzureActivity
+| where OperationNameValue endswith "DELETE"
+| project Caller, ResourceType, Resource
+// Use: Audit critical resource changes
+
+// 12. Firewall Denies from Single Source
+CommonSecurityLog
+| where DeviceVendor == "Palo Alto Networks" 
+| where Action == "Deny"
+| summarize count() by SourceIP, DestinationIP
+| top 10 by count_
+// Use: Identify scan/attack patterns
+
+// 13. Office 365 Mail Forwarding Rules
+OfficeActivity
+| where Operation == "New-InboxRule"
+| where Parameters contains "ForwardTo"
+| project UserId, Parameters
+// Use: Detect email exfiltration via inbox rules
+
+// 14. VM Login Failures (Linux)
+Syslog
+| where Facility == "auth"
+| where Message contains "Failed password"
+| summarize count() by Computer, SourceIP
+// Use: Monitor Linux server brute-force attempts
+
+// 15. Shared File Access from Unusual IPs
+SecurityEvent
+| where EventID == 5145 // Network share access
+| join kind=inner (SigninLogs | distinct IPAddress, UserPrincipalName) on $left.IpAddress == $right.IPAddress
+| summarize AccessCount=count() by IpAddress, ShareName
+// Use: Detect anomalous access to sensitive shares
+
+// 16. New Service Installations
+SecurityEvent
+| where EventID == 4697 // Service installation
+| project TimeGenerated, Computer, ServiceName, ServiceFileName
+// Use: Spot unauthorized service installations
+
+// 17. Azure Key Vault Access Audit
+AzureDiagnostics
+| where ResourceType == "VAULTS"
+| where OperationName == "VaultGet"
+| project CallerIPAddress, ResultSignature
+// Use: Monitor sensitive credential store access
+
+// 18. Network Connections to TOR Exit Nodes
+let tor_exit_nodes = externaldata(IP:string) [@"https://check.torproject.org/torbulkexitlist"] with (format="txt");
+SecurityEvent
+| where EventID == 3 // Network connection
+| join kind=inner tor_exit_nodes on $left.DestinationIp == $right.IP
+// Use: Detect connections to anonymization networks
+
+// 19. Windows Event Log Cleared
+SecurityEvent
+| where EventID == 1102 // Log cleared
+| project Computer, SubjectUserName, TimeGenerated
+// Use: Identify potential evidence tampering
+
+// 20. AWS CloudTrail Unauthorized Attempts
+AWSCloudTrail
+| where errorCode == "AccessDenied"
+| summarize count() by userIdentity.arn, eventSource
+// Use: Monitor AWS privilege escalation
+
+// 21. Microsoft 365 DLP Policy Matches
+OfficeActivity
+| where Operation == "DLPIncident"
+| project TimeGenerated, UserId, Policy
+// Use: Review Data Loss Prevention violations
+
+// 22. Container Privilege Escalation
+ContainerLog
+| where LogEntry contains "privileged container"
+| project ContainerID, Image, LogEntry
+// Use: Detect Docker/Kubernetes security misconfigurations
+
+// 23. Azure SQL Database Firewall Changes
+AzureDiagnostics
+| where Category == "SQLSecurityAuditEvents"
+| where action_name_s == "FirewallRuleOperation"
+| project CallerIP, rule_name_s, status_s
+// Use: Audit critical database firewall modifications
+
+// 24. GPO Modification Events
+SecurityEvent
+| where EventID == 5136 // Directory Service Changes
+| where ObjectClass == "groupPolicyContainer"
+| project TimeGenerated, SubjectUserName, ObjectDN
+// Use: Track unauthorized Group Policy changes
+
+// 25. VPN Logins Outside Business Hours
+CommonSecurityLog
+| where DeviceVendor == "Cisco" 
+| where Activity == "User authenticated"
+| extend Hour = gettime(TimeGenerated)
+| where Hour < 8 or Hour > 18 // Adjust hours
+// Use: Flag anomalous VPN usage
+
+// 26. Azure Role Assignments
+AzureActivity
+| where OperationName == "Microsoft.Authorization/roleAssignments/write"
+| project Caller, Properties
+// Use: Audit critical permission changes
+
+// 27. Windows Defender Threats
+ProtectionStatus
+| where ThreatStatus == "Detected"
+| project Computer, Threat, ActionTaken
+// Use: List active malware detections
+
+// 28. NSG Flow Logs Blocked Traffic
+AzureNetworkAnalytics_CL
+| where FlowType_s == "Blocked"
+| summarize Bytes=sum(TotalBytes_s) by SourceIP_s, DestinationIP_s
+// Use: Analyze blocked traffic patterns
+
+// 29. SharePoint File Downloads by External Users
+OfficeActivity
+| where OfficeWorkload == "SharePoint"
+| where Operation == "FileDownloaded"
+| where UserType == "Guest"
+| project UserId, SourceFileName
+// Use: Monitor external file access
+
+// 30. Linux Sudo Command Audit
+Syslog
+| where ProcessName == "sudo"
+| parse Message with "COMMAND=" Command
+| project TimeGenerated, Computer, User, Command
+// Use: Audit privilege escalation commands
+
+// 31. Azure Storage Public Access Blocks
+AzureActivity
+| where OperationName == "Microsoft.Storage/storageAccounts/write"
+| where Properties contains "publicAccess"
+| project Caller, Properties
+// Use: Detect accidental public data exposure
+
+// 32. WMI Event Subscription Creation
+SecurityEvent
+| where EventID == 5861 // WMI filter/consumer binding
+| project TimeGenerated, Computer, User
+// Use: Detect persistence via WMI event subscriptions
+
+// 33. Microsoft Cloud App Security Alerts
+SecurityAlert
+| where ProviderName == "MCAS"
+| where AlertName contains "ransomware"
+// Use: Review high-severity cloud alerts
+
+// 34. IoT Device Authentication Failures
+SecurityEvent
+| where DeviceType == "IoT"
+| where EventID == 4625
+| summarize count() by DeviceId
+// Use: Monitor IoT security
+
+// 35. Azure Policy Compliance Changes
+AzureActivity
+| where OperationName == "Microsoft.PolicyInsights/policyStates/triggerEvaluation"
+| project Caller, ResourceGroup
+// Use: Audit compliance policy overrides
